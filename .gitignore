@@ -17,3 +17,8 @@ testing/
 # Playwright MCP session artifacts
 .playwright-mcp/
 /fk-*
+
+# Dashboard runtime database and temporary logs
+dashboard/data/
+dashboard/frontend/.next/
+dashboard/frontend/node_modules/
