@@ -24,14 +24,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from typing import Optional
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 FIXTURES = ROOT / "tests" / "fixtures"
+
+from lib._env import load_env
+
+load_env()
 
 GREEN, RED, YELLOW, GREY, BOLD, OFF = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[1m", "\033[0m"
 if not sys.stdout.isatty():
@@ -239,13 +248,11 @@ CASES = {
 
 
 # ----------------------------------------------------------------- runner ---
-def ask(prompt: str, timeout: int) -> tuple[str, str]:
-    """Run the agent headless from the repo root, so .claude/skills is found."""
+def ask_claude(prompt: str, timeout: int) -> tuple[str, str]:
+    """Run the agent headless via Claude Code CLI from the repo root."""
     try:
         result = subprocess.run(
             ["claude", "-p", prompt, "--output-format", "text"],
-            # The CLI writes UTF-8 whatever the locale. Read as cp1252 (Windows),
-            # the answer comes back garbled, or fails on a byte cp1252 lacks.
             cwd=ROOT, capture_output=True, encoding="utf-8", timeout=timeout,
         )
     except FileNotFoundError:
@@ -253,8 +260,121 @@ def ask(prompt: str, timeout: int) -> tuple[str, str]:
     except subprocess.TimeoutExpired:
         return "", f"no answer within {timeout}s"
     if result.returncode != 0:
-        return "", (result.stderr or result.stdout).strip().splitlines()[-1][:90]
+        err = (result.stderr or result.stdout).strip().splitlines()
+        return "", (err[-1] if err else "claude CLI failed")[:90]
     return result.stdout, ""
+
+
+def resolve_skill_context(prompt: str) -> str:
+    """Load the referenced skill documentation to provide context for non-agentic LLM backends."""
+    m = re.search(r"Use the (linkedin-[a-z-]+) skill", prompt)
+    if not m:
+        return ""
+    skill_name = m.group(1)
+    doc_path = ROOT / "skills" / skill_name / "SKILL.md"
+    text = doc_path.read_text(encoding="utf-8") if doc_path.is_file() else ""
+    if "hook-formulas" in text or "hook-formulas.md" in prompt or skill_name == "linkedin-hook-extractor":
+        hf = ROOT / "references" / "hook-formulas.md"
+        if hf.is_file():
+            text += "\n\nHook Formulas:\n" + hf.read_text(encoding="utf-8")
+    if skill_name == "linkedin-humanizer":
+        sr = ROOT / "skills" / "linkedin-humanizer" / "references" / "scrub-rules.md"
+        if sr.is_file():
+            text += "\n\nScrub Rules:\n" + sr.read_text(encoding="utf-8")
+        ac = ROOT / "skills" / "linkedin-humanizer" / "references" / "audit-checklist.md"
+        if ac.is_file():
+            text += "\n\nAudit Checklist:\n" + ac.read_text(encoding="utf-8")
+    return text
+
+
+def ask_gemini(
+    prompt: str,
+    timeout: int,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    max_retries: int = 3,
+) -> tuple[str, str]:
+    """Call Gemini generateContent API via standard library HTTP."""
+    key = api_key or os.getenv("GEMINI_API_KEY")
+    if not key:
+        return "", "GEMINI_API_KEY is not set in environment or .env"
+    model_name = model or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+
+    skill_context = resolve_skill_context(prompt)
+    system_instruction = (
+        "You are an agent executing skills from the linkedin-skills repository. "
+        "Strictly adhere to the following skill documentation and rules:\n\n"
+        f"{skill_context}"
+    ) if skill_context else "You are an AI assistant helping with LinkedIn content."
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+
+    last_error = ""
+    for attempt in range(max_retries):
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.load(resp)
+            candidates = body.get("candidates") or []
+            if not candidates:
+                return "", "Gemini returned no candidates in response"
+            parts = candidates[0].get("content", {}).get("parts") or []
+            text = "".join(p.get("text", "") for p in parts)
+            if not text:
+                return "", "Gemini candidate contained no text"
+            return text, ""
+        except urllib.error.HTTPError as e:
+            status = e.code
+            try:
+                err_json = json.loads(e.read().decode("utf-8", errors="replace"))
+                msg = err_json.get("error", {}).get("message") or str(e.reason)
+            except Exception:
+                msg = str(e.reason)
+            last_error = f"Gemini API HTTP {status}: {msg[:80]}"
+            if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                time.sleep(4.0 * (attempt + 1))
+                continue
+            return "", last_error
+        except (TimeoutError, subprocess.TimeoutExpired) as e:
+            last_error = f"no answer within {timeout}s"
+            if attempt < max_retries - 1:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            return "", last_error
+        except urllib.error.URLError as e:
+            last_error = f"Gemini connection error: {getattr(e, 'reason', type(e).__name__)}"
+            if attempt < max_retries - 1:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            return "", last_error
+        except Exception as e:
+            return "", f"Gemini request failed: {type(e).__name__}"
+
+    return "", last_error
+
+
+def ask(
+    prompt: str,
+    timeout: int,
+    backend: str = "claude",
+    model: Optional[str] = None,
+) -> tuple[str, str]:
+    """Dispatch to the explicitly chosen evaluation backend."""
+    if backend == "claude":
+        return ask_claude(prompt, timeout)
+    elif backend == "gemini":
+        return ask_gemini(prompt, timeout, model=model)
+    return "", f"unsupported backend: {backend!r}"
 
 
 def main() -> int:
@@ -263,6 +383,17 @@ def main() -> int:
     parser.add_argument("--case", action="append", help="run only these (repeatable)")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--timeout", type=int, default=420)
+    parser.add_argument(
+        "--backend",
+        choices=["claude", "gemini"],
+        default="claude",
+        help="Evaluation backend: 'claude' (default, uses Claude Code CLI) or 'gemini' (uses Gemini API)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Specific model name (e.g. gemini-2.5-flash for Gemini)",
+    )
     parser.add_argument("--save", type=pathlib.Path, help="write every answer here for reading")
     args = parser.parse_args()
 
@@ -277,13 +408,13 @@ def main() -> int:
         print(f"no such case: {unknown}. --list to see them all")
         return 2
 
-    print(f"{BOLD}Skill behaviour{OFF}  ({len(selected)} cases, one model call each)\n")
+    print(f"{BOLD}Skill behaviour [{args.backend}]{OFF}  ({len(selected)} cases, one model call each)\n")
     transcripts, failures, skipped = {}, 0, 0
     for key in selected:
         title, build = CASES[key]
         prompt, grade = build()
         started = time.time()
-        output, error = ask(prompt, args.timeout)
+        output, error = ask(prompt, args.timeout, backend=args.backend, model=args.model)
         transcripts[key] = {"prompt": prompt, "output": output, "error": error}
         if error:
             print(f"  [{YELLOW}skip{OFF}] {title:<52} {error}")

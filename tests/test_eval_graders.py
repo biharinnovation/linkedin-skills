@@ -11,14 +11,25 @@ Offline: no network, no LLM calls, deterministic fixtures only.
 """
 from __future__ import annotations
 
+import io
+import os
 import pathlib
+import subprocess
 import sys
 import unittest
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from evals.run_evals import CASES
+from evals.run_evals import (
+    CASES,
+    ask,
+    ask_claude,
+    ask_gemini,
+    resolve_skill_context,
+)
 
 
 class EvalGradersTest(unittest.TestCase):
@@ -192,6 +203,146 @@ class EvalGradersTest(unittest.TestCase):
         passed, msg = grade(inflated)
         self.assertFalse(passed)
         self.assertIn("claims [10] engagers, was given 3", msg)
+
+
+class BackendRunnerTests(unittest.TestCase):
+    """Offline unit tests for evaluation model runners and error handling."""
+
+    @patch("subprocess.run")
+    def test_ask_claude_missing_cli(self, mock_run):
+        mock_run.side_effect = FileNotFoundError()
+        output, error = ask_claude("test prompt", timeout=10)
+        self.assertEqual(output, "")
+        self.assertEqual(error, "the `claude` CLI is not on PATH")
+
+    @patch("subprocess.run")
+    def test_ask_claude_timeout(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=10)
+        output, error = ask_claude("test prompt", timeout=10)
+        self.assertEqual(output, "")
+        self.assertEqual(error, "no answer within 10s")
+
+    @patch("subprocess.run")
+    def test_ask_claude_auth_failure(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"],
+            returncode=1,
+            stdout="",
+            stderr="Failed to authenticate: OAuth session expired and could not be refreshed",
+        )
+        output, error = ask_claude("test prompt", timeout=10)
+        self.assertEqual(output, "")
+        self.assertIn("OAuth session expired", error)
+
+    @patch("subprocess.run")
+    def test_ask_claude_success(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"],
+            returncode=0,
+            stdout="Claude response output",
+            stderr="",
+        )
+        output, error = ask_claude("test prompt", timeout=10)
+        self.assertEqual(output, "Claude response output")
+        self.assertEqual(error, "")
+
+    def test_ask_gemini_missing_api_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            output, error = ask_gemini("test prompt", timeout=10)
+            self.assertEqual(output, "")
+            self.assertEqual(error, "GEMINI_API_KEY is not set in environment or .env")
+
+    @patch("urllib.request.urlopen")
+    def test_ask_gemini_http_403_auth_failure(self, mock_urlopen):
+        err = urllib.error.HTTPError(
+            url="https://example.invalid",
+            code=403,
+            msg="Forbidden",
+            hdrs={},
+            fp=io.BytesIO(b'{"error":{"message":"API key not valid"}}'),
+        )
+        mock_urlopen.side_effect = err
+        output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=1)
+        self.assertEqual(output, "")
+        self.assertIn("HTTP 403", error)
+        self.assertIn("API key not valid", error)
+        self.assertNotIn("test_key", error)
+
+    @patch("urllib.request.urlopen")
+    def test_ask_gemini_http_429_rate_limit(self, mock_urlopen):
+        def make_err():
+            return urllib.error.HTTPError(
+                url="https://example.invalid",
+                code=429,
+                msg="Too Many Requests",
+                hdrs={},
+                fp=io.BytesIO(b'{"error":{"message":"Quota exceeded"}}'),
+            )
+        mock_urlopen.side_effect = [make_err(), make_err()]
+        with patch("time.sleep"):
+            output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=2)
+        self.assertEqual(output, "")
+        self.assertIn("HTTP 429", error)
+        self.assertIn("Quota exceeded", error)
+        self.assertNotIn("test_key", error)
+
+    @patch("urllib.request.urlopen")
+    def test_ask_gemini_timeout(self, mock_urlopen):
+        mock_urlopen.side_effect = TimeoutError()
+        with patch("time.sleep"):
+            output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=1)
+        self.assertEqual(output, "")
+        self.assertEqual(error, "no answer within 10s")
+
+    @patch("urllib.request.urlopen")
+    def test_ask_gemini_malformed_response_empty_candidates(self, mock_urlopen):
+        resp_mock = MagicMock()
+        resp_mock.read.return_value = b'{"candidates":[]}'
+        mock_urlopen.return_value.__enter__.return_value = resp_mock
+        output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=1)
+        self.assertEqual(output, "")
+        self.assertEqual(error, "Gemini returned no candidates in response")
+
+    @patch("urllib.request.urlopen")
+    def test_ask_gemini_malformed_response_no_text(self, mock_urlopen):
+        resp_mock = MagicMock()
+        resp_mock.read.return_value = b'{"candidates":[{"content":{"parts":[]}}]}'
+        mock_urlopen.return_value.__enter__.return_value = resp_mock
+        output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=1)
+        self.assertEqual(output, "")
+        self.assertEqual(error, "Gemini candidate contained no text")
+
+    @patch("urllib.request.urlopen")
+    def test_ask_gemini_success(self, mock_urlopen):
+        resp_mock = MagicMock()
+        resp_mock.read.return_value = b'{"candidates":[{"content":{"parts":[{"text":"Generated response"}]}}]}'
+        mock_urlopen.return_value.__enter__.return_value = resp_mock
+        output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=1)
+        self.assertEqual(output, "Generated response")
+        self.assertEqual(error, "")
+
+    def test_ask_dispatch_routing(self):
+        with patch("evals.run_evals.ask_claude", return_value=("claude_out", "")) as m_claude:
+            out, err = ask("test prompt", timeout=10, backend="claude")
+            self.assertEqual(out, "claude_out")
+            m_claude.assert_called_once_with("test prompt", 10)
+
+        with patch("evals.run_evals.ask_gemini", return_value=("gemini_out", "")) as m_gemini:
+            out, err = ask("test prompt", timeout=10, backend="gemini", model="test-model")
+            self.assertEqual(out, "gemini_out")
+            m_gemini.assert_called_once_with("test prompt", 10, model="test-model")
+
+        out, err = ask("test prompt", timeout=10, backend="unknown")
+        self.assertEqual(out, "")
+        self.assertIn("unsupported backend: 'unknown'", err)
+
+    def test_resolve_skill_context(self):
+        ctx = resolve_skill_context("Use the linkedin-reply-handler skill.\n\nContext...")
+        self.assertIn("LinkedIn Reply Handler", ctx)
+        self.assertIn("parentComment", ctx)
+
+        empty_ctx = resolve_skill_context("No skill specified in prompt.")
+        self.assertEqual(empty_ctx, "")
 
 
 if __name__ == "__main__":
