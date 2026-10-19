@@ -16,7 +16,11 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 

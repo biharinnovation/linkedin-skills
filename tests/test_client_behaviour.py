@@ -8,8 +8,13 @@ Offline. The network layer is replaced, so nothing is spent and no key is read.
 """
 from __future__ import annotations
 
+import pathlib
+import sys
 import unittest
 from unittest import mock
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from lib.apify_client import ApifyClient
 

@@ -82,11 +82,11 @@ def case_reply_parent():
                 if re.search(r"\d{6,}", u)]
         if not urns:
             return False, "no parentComment urn with real ids stated"
-        if not any(top in u for u in urns):
-            return False, f"never targets the top-level comment {top}; said {urns[:2]}"
         misdirected = [u for u in urns if wrong in u and top not in u]
         if misdirected:
             return False, f"targets the reply's own id {wrong}: the flattening rule was missed"
+        if not any(top in u for u in urns):
+            return False, f"never targets the top-level comment {top}; said {urns[:2]}"
         return True, f"correct top-level target {top}"
 
     return prompt, grade
@@ -278,7 +278,7 @@ def main() -> int:
         return 2
 
     print(f"{BOLD}Skill behaviour{OFF}  ({len(selected)} cases, one model call each)\n")
-    transcripts, failures = {}, 0
+    transcripts, failures, skipped = {}, 0, 0
     for key in selected:
         title, build = CASES[key]
         prompt, grade = build()
@@ -287,6 +287,7 @@ def main() -> int:
         transcripts[key] = {"prompt": prompt, "output": output, "error": error}
         if error:
             print(f"  [{YELLOW}skip{OFF}] {title:<52} {error}")
+            skipped += 1
             continue
         passed, detail = grade(output)
         mark = f"{GREEN}pass{OFF}" if passed else f"{RED}FAIL{OFF}"
@@ -296,7 +297,20 @@ def main() -> int:
     if args.save:
         args.save.write_text(json.dumps(transcripts, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"\n{GREY}answers written to {args.save}{OFF}")
-    print(f"\n{BOLD}{'All cases passed' if not failures else f'{failures} case(s) failed'}{OFF}")
+
+    passed_count = len(selected) - failures - skipped
+    if skipped == len(selected):
+        summary = f"All {skipped} case(s) skipped (no model calls completed)"
+    elif failures == 0 and skipped == 0:
+        summary = "All cases passed"
+    else:
+        parts = [f"{passed_count} passed"]
+        if failures:
+            parts.append(f"{failures} failed")
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        summary = ", ".join(parts)
+    print(f"\n{BOLD}{summary}{OFF}")
     return failures
 
 

@@ -85,7 +85,7 @@ Actors used (all no-cookies, public, no LinkedIn login required):
 
 | Use case | Actor | Approx cost |
 |---|---|---|
-| Post body by URL | `supreme_coder/linkedin-post` | $1 / 1,000 |
+| Post body by URL | `apimaestro/linkedin-post-detail` | $1 / 1,000 |
 | Comments + replies on a post | `apimaestro/linkedin-post-comments-replies-engagements-scraper-no-cookies` | $5 / 1,000 |
 | Your own recent comments | `apimaestro/linkedin-profile-comments` | $5 / 1,000 |
 | Likers + commenters on any post | `scraping_solutions/linkedin-posts-engagers-likers-and-commenters-no-cookies` | $5 / 1,000 |

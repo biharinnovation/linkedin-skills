@@ -12,9 +12,11 @@ from __future__ import annotations
 import inspect
 import pathlib
 import re
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 # lib.foo( ... ) and lib.ApifyClient.foo( ... ), tolerating one nesting level of
 # parentheses inside the arguments (kind="post", platforms=[{...}]).

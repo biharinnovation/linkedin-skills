@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 SKILLS = sorted(d for d in (ROOT / "skills").iterdir() if (d / "SKILL.md").is_file())
 NAMES = {d.name for d in SKILLS}
@@ -276,10 +278,6 @@ class SkillConventions(unittest.TestCase):
         self.assertEqual(missing, [], "Hard rules that do not point at the global voice rules:\n  " + "\n  ".join(missing))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class EnvironmentVariableNames(unittest.TestCase):
     """The names the code reads must be the names the docs tell people to set.
 
@@ -373,3 +371,7 @@ class PersonalTemplates(unittest.TestCase):
             self.assertTrue(
                 "gitignore" in text or "repo" in text,
                 f"{name} never warns that a filled copy travels with the repo")
+
+
+if __name__ == "__main__":
+    unittest.main()
