@@ -12,6 +12,7 @@ Offline: no network, no LLM calls, deterministic fixtures only.
 from __future__ import annotations
 
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -320,6 +321,9 @@ class BackendRunnerTests(unittest.TestCase):
         output, error = ask_gemini("test prompt", timeout=10, api_key="test_key", max_retries=1)
         self.assertEqual(output, "Generated response")
         self.assertEqual(error, "")
+        sent_req = mock_urlopen.call_args[0][0]
+        payload = json.loads(sent_req.data.decode("utf-8"))
+        self.assertEqual(payload.get("generationConfig"), {"temperature": 0.0})
 
     def test_ask_dispatch_routing(self):
         with patch("evals.run_evals.ask_claude", return_value=("claude_out", "")) as m_claude:
@@ -340,6 +344,15 @@ class BackendRunnerTests(unittest.TestCase):
         ctx = resolve_skill_context("Use the linkedin-reply-handler skill.\n\nContext...")
         self.assertIn("LinkedIn Reply Handler", ctx)
         self.assertIn("parentComment", ctx)
+
+        hum_audit_ctx = resolve_skill_context("Use the linkedin-humanizer skill with --mode audit on this draft.")
+        self.assertIn("Post Audit Sub-Skill", hum_audit_ctx)
+        self.assertIn("Blockers (auto-fail)", hum_audit_ctx)
+        self.assertNotIn("Scrub Rules", hum_audit_ctx)
+
+        hum_scrub_ctx = resolve_skill_context("Use the linkedin-humanizer skill to scrub this text.")
+        self.assertIn("Scrub Rules", hum_scrub_ctx)
+        self.assertNotIn("Post Audit Sub-Skill", hum_scrub_ctx)
 
         empty_ctx = resolve_skill_context("No skill specified in prompt.")
         self.assertEqual(empty_ctx, "")

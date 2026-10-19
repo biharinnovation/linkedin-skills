@@ -278,12 +278,17 @@ def resolve_skill_context(prompt: str) -> str:
         if hf.is_file():
             text += "\n\nHook Formulas:\n" + hf.read_text(encoding="utf-8")
     if skill_name == "linkedin-humanizer":
-        sr = ROOT / "skills" / "linkedin-humanizer" / "references" / "scrub-rules.md"
-        if sr.is_file():
-            text += "\n\nScrub Rules:\n" + sr.read_text(encoding="utf-8")
-        ac = ROOT / "skills" / "linkedin-humanizer" / "references" / "audit-checklist.md"
-        if ac.is_file():
-            text += "\n\nAudit Checklist:\n" + ac.read_text(encoding="utf-8")
+        if "audit" in prompt.lower():
+            pa = ROOT / "skills" / "linkedin-humanizer" / "sub-skills" / "post-audit.md"
+            if pa.is_file():
+                text += "\n\nPost Audit Sub-Skill:\n" + pa.read_text(encoding="utf-8")
+            ac = ROOT / "skills" / "linkedin-humanizer" / "references" / "audit-checklist.md"
+            if ac.is_file():
+                text += "\n\nAudit Checklist:\n" + ac.read_text(encoding="utf-8")
+        else:
+            sr = ROOT / "skills" / "linkedin-humanizer" / "references" / "scrub-rules.md"
+            if sr.is_file():
+                text += "\n\nScrub Rules:\n" + sr.read_text(encoding="utf-8")
     return text
 
 
@@ -292,13 +297,13 @@ def ask_gemini(
     timeout: int,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
-    max_retries: int = 3,
+    max_retries: int = 4,
 ) -> tuple[str, str]:
     """Call Gemini generateContent API via standard library HTTP."""
     key = api_key or os.getenv("GEMINI_API_KEY")
     if not key:
         return "", "GEMINI_API_KEY is not set in environment or .env"
-    model_name = model or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+    model_name = model or os.getenv("GEMINI_MODEL") or "gemini-3.7-flash"
 
     skill_context = resolve_skill_context(prompt)
     system_instruction = (
@@ -310,6 +315,7 @@ def ask_gemini(
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "generationConfig": {"temperature": 0.0},
     }
     data = json.dumps(payload).encode("utf-8")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
@@ -342,7 +348,7 @@ def ask_gemini(
                 msg = str(e.reason)
             last_error = f"Gemini API HTTP {status}: {msg[:80]}"
             if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-                time.sleep(4.0 * (attempt + 1))
+                time.sleep(8.0 * (attempt + 1))
                 continue
             return "", last_error
         except (TimeoutError, subprocess.TimeoutExpired) as e:
